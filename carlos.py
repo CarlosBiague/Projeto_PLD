@@ -21,7 +21,7 @@ import csv
 from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
 from Crypto.Protocol.KDF import PBKDF2
-import geoip2.database  # Import do GeoIP2
+import geoip2.database
 
 # ========================= VARIÁVEIS GLOBAIS =========================
 mensagens = []         # Armazena mensagens lidas de mensagens.txt
@@ -29,7 +29,7 @@ ARQ_MENSAGENS = "mensagens.txt"
 DB_NAME = "seguranca.db"  # Nome do arquivo do SQLite
 
 # Variáveis para GeoIP2
-GEOIP_DB = "GeoLite2-Country.mmdb"  # Certifique-se de que o arquivo existe
+GEOIP_DB = "/home/kali/projeto/GeoLite2-City.mmdb"
 try:
     geoip_reader = geoip2.database.Reader(GEOIP_DB)
 except Exception as e:
@@ -46,7 +46,8 @@ def get_country(ip_address):
     except Exception:
         return "N/A"
 
-# ========================== FUNÇÕES DE BD (SQLite) =========================
+# ========================== FUNÇÕES DE BD (SQLite/GEOIP) =========================
+
 def initDB():
     if not os.path.exists(DB_NAME):
         print(f"Criando banco de dados: {DB_NAME}")
@@ -56,70 +57,91 @@ def initDB():
 
 def criarTabelasDB():
     try:
-        with sqlite3.connect(DB_NAME) as con:
-            cur = con.cursor()
-            # Tabela para logs HTTP/HTTPS
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS log_http (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT,
-                    ip_src TEXT,
-                    ip_dst TEXT,
-                    port_dst TEXT,
-                    country TEXT,
-                    raw_line TEXT
-                )
-            """)
-            # Tabela para logs SSH
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS log_ssh (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT,
-                    ip TEXT,
-                    port TEXT,
-                    country TEXT,
-                    raw_line TEXT
-                )
-            """)
-            con.commit()
+        # Conecta ao banco de dados SQLite
+        con = sqlite3.connect(DB_NAME)
+        cur = con.cursor()
+
+        # Cria a tabela para logs HTTP/HTTPS
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS log_http (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                ip_src TEXT,
+                ip_dst TEXT,
+                port_dst TEXT,
+                country TEXT,
+                raw_line TEXT
+            )
+        """)
+
+        # Cria a tabela para logs SSH
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS log_ssh (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                ip TEXT,
+                port TEXT,
+                country TEXT,
+                raw_line TEXT
+            )
+        """)
+        con.commit()
+        con.close()
     except Exception as e:
         print("Erro ao criar tabelas no DB:", e)
 
+def get_country(ip):
+    """Consulta o país do IP usando o banco GeoIP2."""
+    try:
+        with geoip2.database.Reader(GEOIP_DB) as reader:
+            # Você pode usar reader.city(ip) ou reader.country(ip) conforme sua necessidade
+            response = reader.city(ip)
+            return response.country.name  # ou use response.country.iso_code se preferir
+    except Exception as e:
+        print("Erro ao buscar país:", e)
+        return "Desconhecido"
+
 def inserirLogsHTTPNoDB(dados):
     try:
-        with sqlite3.connect(DB_NAME) as con:
-            cur = con.cursor()
-            for item in dados:
-                dia, mes, hora, ipSRC, ipDST, dPort, linhaCompleta = item
-                timestamp = f"{dia}-{mes} {hora}"
-                # Utiliza GeoIP2 para identificar o país do IP de origem
-                country = get_country(ipSRC)
-                cur.execute("""
-                    INSERT INTO log_http (timestamp, ip_src, ip_dst, port_dst, country, raw_line)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, (timestamp, ipSRC, ipDST, dPort, country, linhaCompleta))
-            con.commit()
+        # Conecta ao banco de dados SQLite
+        con = sqlite3.connect(DB_NAME)
+        cur = con.cursor()
+        for item in dados:
+            dia, mes, hora, ipSRC, ipDST, dPort, linhaCompleta = item
+            timestamp = f"{dia}-{mes} {hora}"
+            # Utiliza a função get_country para identificar o país do IP de origem
+            country = get_country(ipSRC)
+            cur.execute("""
+                INSERT INTO log_http (timestamp, ip_src, ip_dst, port_dst, country, raw_line)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (timestamp, ipSRC, ipDST, dPort, country, linhaCompleta))
+        con.commit()
+        con.close()
     except Exception as e:
         print("Erro ao inserir logs HTTP no DB:", e)
 
 def inserirLogsSSHNoDB(dados):
     try:
-        with sqlite3.connect(DB_NAME) as con:
-            cur = con.cursor()
-            for item in dados:
-                dia, mes, hora, ip, port, linhaCompleta = item
-                timestamp = f"{dia}-{mes} {hora}"
-                # Utiliza GeoIP2 para identificar o país do IP
-                country = get_country(ip)
-                cur.execute("""
-                    INSERT INTO log_ssh (timestamp, ip, port, country, raw_line)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (timestamp, ip, port, country, linhaCompleta))
-            con.commit()
+        # Conecta ao banco de dados SQLite
+        con = sqlite3.connect(DB_NAME)
+        cur = con.cursor()
+        for item in dados:
+            dia, mes, hora, ip, port, linhaCompleta = item
+            timestamp = f"{dia}-{mes} {hora}"
+            # Consulta o país usando o arquivo GeoIP2
+            country = get_country(ip)
+            cur.execute("""
+                INSERT INTO log_ssh (timestamp, ip, port, country, raw_line)
+                VALUES (?, ?, ?, ?, ?)
+            """, (timestamp, ip, port, country, linhaCompleta))
+        con.commit()
+        con.close()
     except Exception as e:
         print("Erro ao inserir logs SSH no DB:", e)
 
-# ========================== CARREGAR/SALVAR MENSAGENS ==========================
+
+#=================================== CARREGAR/SALVAR MENSAGENS ==========================
+
 def carregarMensagens():
     global mensagens
     mensagens.clear()
@@ -322,60 +344,6 @@ def construirPacoteIP_TCP_Syn(dst_ip, dst_port):
 
     return ip_header + tcp_header
 
-# ====== 3) MENSAGENS ARQUIVADAS ======
-def menuGerenciarMensagens():
-    while True:
-        print("\n========== MENSAGENS ARQUIVADAS ==========")
-        print("=>1 Listar mensagens")
-        print("=>2 Remover todas as mensagens")
-        print("=>3 Download de todas as mensagens")
-        print("=>4 Voltar ao menu principal")
-
-        op = input("\n>>> ")
-        if op == '1':
-            listarMensagens()
-        elif op == '2':
-            removerMensagens()
-        elif op == '3':
-            downloadMensagens()
-        elif op == '4':
-            break
-        else:
-            print("Opção inválida.")
-
-def listarMensagens():
-    global mensagens
-    if not mensagens:
-        print("Nenhuma mensagem encontrada.")
-        return
-
-    print("\n--- LISTAGEM DE MENSAGENS ---")
-    for m in mensagens:
-        print(f"ID: {m['id']} | Data: {m['data']} | Conteúdo: {m['conteudo']}")
-
-def removerMensagens():
-    global mensagens
-    mensagens.clear()
-    salvarMensagens()
-    print("Todas as mensagens foram removidas com sucesso.")
-
-def downloadMensagens():
-    global mensagens
-    if not mensagens:
-        print("Nenhuma mensagem para baixar.")
-        return
-
-    destino = input("Caminho para salvar (ex.: /home/user/Desktop): ")
-    nome_arquivo = os.path.join(destino, "mensagens_download.txt")
-
-    try:
-        with open(nome_arquivo, "w", encoding="utf-8") as f:
-            for m in mensagens:
-                linha = f"ID={m['id']}  Data={m['data']}  Conteúdo={m['conteudo']}\n"
-                f.write(linha)
-        print(f"Download concluído. Arquivo salvo em: {nome_arquivo}")
-    except Exception as e:
-        print("Erro ao salvar arquivo:", e)
 
 # ====== 4) PORT SCANNER (com PDF e CSV) ======
 def portScanner():
@@ -459,6 +427,22 @@ def gerarRelatorioPortScannerPDF(ip, pInicial, pFinal, portas, dataInicio, dataF
     print(f"Relatório PDF salvo em: {nome_pdf}")
 
 # ====== 5) ANÁLISE DE LOGS DE SERVIÇOS (HTTP/SSH) ======
+
+
+def get_geo_info(ip):
+
+  #  Consulta o banco de dados GeoLite2-City para obter a cidade e o país do IP.
+
+    try:
+        with geoip2.database.Reader(GEOIP_DB) as reader:
+            response = reader.city(ip)
+            cidade = response.city.name if response.city.name else "Desconhecido"
+            pais = response.country.name if response.country.name else "Desconhecido"
+            return cidade, pais
+    except Exception as e:
+        print(f"Erro ao buscar informações geo para IP {ip}: {e}")
+        return "Desconhecido", "Desconhecido"
+
 def analiseLogServicos():
     """
     Exemplo: lê /var/log/ufw.log, procura 'DPT=80' ou 'DPT=443' e gera CSV/PDF.
@@ -473,7 +457,8 @@ def analiseLogServicos():
     with open(log_caminho, 'r', encoding='utf-8', errors='ignore') as f:
         linhas = f.readlines()
 
-    cabecalho = ["Dia", "Mes", "Hora", "IpSRC", "IpDST", "PortDST"]
+    # Atualiza cabeçalho para incluir cidade e país
+    cabecalho = ["Dia", "Mes", "Hora", "IpSRC", "IpDST", "PortDST", "Cidade", "País"]
     dados = []
     for linha in linhas:
         if "DPT=80" in linha or "DPT=443" in linha:
@@ -496,27 +481,46 @@ def analiseLogServicos():
                 elif "DPT=" in c:
                     dPort = c.split("=")[1]
 
-            dados.append([dia, mes, hora, ipSRC, ipDST, dPort, linha.strip()])
+            # Verifica se ipSRC foi extraído corretamente
+            if not ipSRC:
+                print("IP de origem não encontrado na linha:", linha.strip())
+                continue
+
+            # Consulta cidade e país usando o GeoLite2-City via get_geo_info
+            cidade, pais = get_geo_info(ipSRC)
+
+            # Adiciona os dados (incluindo cidade e país) à lista
+            dados.append([dia, mes, hora, ipSRC, ipDST, dPort, cidade, pais, linha.strip()])
 
     if not dados:
         print("Nenhuma linha encontrada com DPT=80 ou 443.")
         return
 
-    # Insere no BD
+    # Insere os dados no BD
     inserirLogsHTTPNoDB(dados)
 
-    # CSV
+    # Gera CSV com os dados (apenas as 8 primeiras colunas)
     opCsv = input("Gerar CSV dos logs de serviços? [y/n]: ")
     if opCsv.lower() == 'y':
-        dadosParaCSV = [d[:6] for d in dados]
+        dadosParaCSV = [d[:8] for d in dados]
         gerarCSVLog("servicosHTTP", cabecalho, dadosParaCSV)
 
-    # PDF
+    # Gera PDF com os dados (apenas as 8 primeiras colunas)
     opPdf = input("Gerar PDF dos logs de serviços? [y/n]: ")
     if opPdf.lower() == 'y':
-        dadosParaPDF = [d[:6] for d in dados]
+        dadosParaPDF = [d[:8] for d in dados]
         gerarRelatorioLogServicosPDF("servicosHTTP", cabecalho, dadosParaPDF)
         print("Relatório PDF gerado com sucesso.")
+
+def inserirLogsHTTPNoDB(dados):
+    """
+    Função de exemplo para inserção dos logs no BD.
+    Aqui, apenas exibimos os dados no console.
+    """
+    print("Inserindo logs no BD...")
+    for d in dados:
+        # d contém: [dia, mes, hora, ipSRC, ipDST, dPort, cidade, pais, raw_line]
+        print(f"Inserindo: {d}")
 
 def gerarCSVLog(nome, cabecalho, dados):
     csv_nome = f"{nome}.csv"
@@ -562,7 +566,9 @@ def gerarRelatorioLogServicosPDF(nome, cabecalho, dados):
     pdf.save()
     print(f"PDF gerado: {pdf_nome}")
 
+
 # ====== 6) ANÁLISE LOGS AUTH (auth.log) ======
+
 def analiseLogsAuth():
     """
     Filtra 'Failed password' de /var/log/auth.log, gera CSV/PDF e insere no BD log_ssh.
@@ -577,8 +583,8 @@ def analiseLogsAuth():
         linhas = f.readlines()
 
     dados = []
-    cabecalho = ["Dia", "Mes", "Hora", "IP", "Porto"]
-    import re
+    # Atualizamos o cabeçalho para incluir Cidade e País
+    cabecalho = ["Dia", "Mes", "Hora", "IP", "Porto", "Cidade", "País"]
     re_ip = re.compile(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}")
 
     for linha in linhas:
@@ -596,7 +602,13 @@ def analiseLogsAuth():
             porto_match = re.search(r"port\s(\d+)", linha)
             porto = porto_match.group(1) if porto_match else ""
 
-            dados.append([dia, mes, hora, ip, porto, linha.strip()])
+            if ip:
+                cidade, pais = get_geo_info(ip)
+            else:
+                cidade, pais = "Desconhecido", "Desconhecido"
+
+            # Inclui os dados e a linha completa para referência
+            dados.append([dia, mes, hora, ip, porto, cidade, pais, linha.strip()])
 
     if not dados:
         print("Nenhuma entrada de 'Failed password' encontrada.")
@@ -606,14 +618,35 @@ def analiseLogsAuth():
 
     opCsv = input("Gerar CSV de logins falhados? [y/n]: ")
     if opCsv.lower() == 'y':
-        dadosCSV = [d[:5] for d in dados]
+        # Utiliza apenas as 7 primeiras colunas (sem a linha completa)
+        dadosCSV = [d[:7] for d in dados]
         gerarCSVLog("loginfalhados", cabecalho, dadosCSV)
 
     opPdf = input("Gerar PDF de logins falhados? [y/n]: ")
     if opPdf.lower() == 'y':
-        dadosPDF = [d[:5] for d in dados]
+        dadosPDF = [d[:7] for d in dados]
         gerarRelatorioLoginFalhadoPDF("loginfalhados", cabecalho, dadosPDF)
         print("Relatório PDF gerado com sucesso.")
+
+def inserirLogsSSHNoDB(dados):
+    """
+    Exemplo de função para inserção dos logs no banco de dados.
+    Aqui, apenas imprime os dados para demonstração.
+    """
+    print("Inserindo logs de login falhados no BD:")
+    for d in dados:
+        print(d)
+
+def gerarCSVLog(nome, cabecalho, dados):
+    csv_nome = f"{nome}.csv"
+    try:
+        with open(csv_nome, 'w', encoding='utf-8', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(cabecalho)
+            writer.writerows(dados)
+        print(f"CSV gerado: {csv_nome}")
+    except Exception as e:
+        print("Erro ao gerar CSV:", e)
 
 def gerarRelatorioLoginFalhadoPDF(nome, cabecalho, dados):
     pdf_nome = f"{nome}.pdf"
@@ -647,6 +680,8 @@ def gerarRelatorioLoginFalhadoPDF(nome, cabecalho, dados):
 
     pdf.save()
     print(f"PDF gerado: {pdf_nome}")
+
+
 
 # ======= CRIPTOGRAFIA DE FICHEIROS (backup) =======
 def encrypt_file(password, in_filename, out_filename=None, chunksize=64*1024):
@@ -763,7 +798,7 @@ def restaurarBackupEncriptado():
         return
 
     password = input("Digite a senha de desencriptação: ")
-    # Gera nome de saída (ex.: backup_12345.zip) 
+    # Gera nome de saída (ex.: backup_12345.zip)
     # removendo o ".enc" do final
     if enc_path.endswith(".enc"):
         zip_restaurado = enc_path[:-4]  # remove .enc
@@ -775,7 +810,82 @@ def restaurarBackupEncriptado():
     print(f"Backup desencriptado salvo em: {zip_restaurado}")
     print("Para visualizar o conteúdo, basta extrair o ZIP normalmente.")
 
-# ====== 8) CHAT (CLIENTE/SERVIDOR) ======
+# Variável global para armazenar as mensagens arquivadas
+mensagens = []
+
+def salvarMensagens():
+    """
+    Função para salvar as mensagens em armazenamento persistente.
+    Neste exemplo, ela não realiza operação, mas pode ser adaptada.
+    """
+    # Exemplo: salvar em um arquivo JSON ou outro formato.
+    pass
+
+def carregarMensagens():
+    """
+    Função para carregar as mensagens do armazenamento persistente.
+    Neste exemplo, ela não realiza operação, mas pode ser adaptada.
+    """
+    global mensagens
+    # Exemplo: carregar de um arquivo JSON.
+    mensagens = []  # Reinicia a lista se necessário.
+
+# =========== MENU DE MENSAGENS ARQUIVADAS ============
+def menuGerenciarMensagens():
+    while True:
+        print("\n========== MENSAGENS ARQUIVADAS ==========")
+        print("=>1 Listar mensagens")
+        print("=>2 Remover todas as mensagens")
+        print("=>3 Download de todas as mensagens")
+        print("=>4 Voltar ao menu principal")
+
+        op = input("\n>>> ")
+        if op == '1':
+            listarMensagens()
+        elif op == '2':
+            removerMensagens()
+        elif op == '3':
+            downloadMensagens()
+        elif op == '4':
+            break
+        else:
+            print("Opção inválida.")
+
+def listarMensagens():
+    global mensagens
+    if not mensagens:
+        print("Nenhuma mensagem encontrada.")
+        return
+
+    print("\n--- LISTAGEM DE MENSAGENS ---")
+    for m in mensagens:
+        print(f"ID: {m['id']} | Data: {m['data']} | Conteúdo: {m['conteudo']}")
+
+def removerMensagens():
+    global mensagens
+    mensagens.clear()
+    salvarMensagens()
+    print("Todas as mensagens foram removidas com sucesso.")
+
+def downloadMensagens():
+    global mensagens
+    if not mensagens:
+        print("Nenhuma mensagem para baixar.")
+        return
+
+    destino = input("Caminho para salvar (ex.: /home/user/Desktop): ")
+    nome_arquivo = os.path.join(destino, "mensagens_download.txt")
+
+    try:
+        with open(nome_arquivo, "w", encoding="utf-8") as f:
+            for m in mensagens:
+                linha = f"ID={m['id']}  Data={m['data']}  Conteúdo={m['conteudo']}\n"
+                f.write(linha)
+        print(f"Download concluído. Arquivo salvo em: {nome_arquivo}")
+    except Exception as e:
+        print("Erro ao salvar arquivo:", e)
+
+# =========== MENU DE CHAT ============
 def menuChat():
     while True:
         print("\n==== MENU DE CHAT ====")
@@ -793,8 +903,21 @@ def menuChat():
         else:
             print("Opção inválida.")
 
+def arquivarMensagem(remetente, mensagem):
+    """
+    Armazena a mensagem trocada no arquivo global 'mensagens'
+    """
+    global mensagens
+    mensagem_arquivo = {
+        "id": len(mensagens) + 1,
+        "data": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "conteudo": f"{remetente}: {mensagem}"
+    }
+    mensagens.append(mensagem_arquivo)
+    salvarMensagens()
+
 def initServidorChat():
-    HOST = "10.50.0.178"
+    HOST = "10.50.0.178"  # Atualize para o IP desejado
     PORT = 5000
     try:
         server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -813,6 +936,7 @@ def initServidorChat():
 
             msg_cliente = data.decode("utf-8")
             print(f"Cliente: {msg_cliente}")
+            arquivarMensagem("Cliente", msg_cliente)
 
             if msg_cliente.lower() == "exit":
                 print("Cliente solicitou saída. Encerrando servidor...")
@@ -820,6 +944,7 @@ def initServidorChat():
 
             msg_servidor = input("Você (Servidor): ")
             conn.send(msg_servidor.encode("utf-8"))
+            arquivarMensagem("Servidor", msg_servidor)
             if msg_servidor.lower() == "exit":
                 print("Encerrando servidor por comando local.")
                 break
@@ -845,6 +970,7 @@ def initClienteChat():
         while True:
             msg_cliente = input("Você (Cliente): ")
             client_sock.send(msg_cliente.encode("utf-8"))
+            arquivarMensagem("Cliente", msg_cliente)
             if msg_cliente.lower() == "exit":
                 print("Encerrando cliente...")
                 break
@@ -856,6 +982,7 @@ def initClienteChat():
 
             msg_servidor = data.decode("utf-8")
             print(f"Servidor: {msg_servidor}")
+            arquivarMensagem("Servidor", msg_servidor)
             if msg_servidor.lower() == "exit":
                 print("Servidor solicitou saída. Encerrando cliente...")
                 break
@@ -868,7 +995,11 @@ def initClienteChat():
         print("Erro no cliente de chat:", e)
         sys.exit()
 
-# ========== 9) PORT KNOCKING (CLIENTE) ============
+# Carrega mensagens (caso haja persistência) e inicia o programa
+carregarMensagens()
+
+
+#==================KNOCKING (CLIENTE) ============
 def portKnockingClient():
     print("\n======= CLIENTE PORT KNOCKING =======")
     server_ip = input("IP do servidor (máquina com iptables configurado): ")
